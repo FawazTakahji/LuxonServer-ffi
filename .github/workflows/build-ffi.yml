@@ -1,12 +1,7 @@
 name: Build FFI
 
 on:
-  push:
-    branches: ["**"]
-    tags: ["v*"]
-  pull_request:
-  # Manual runs can pick the platforms; push/pull_request always build all of
-  # them because they carry no inputs.
+  # Manual runs only: nothing is built on push, and no release is ever created.
   workflow_dispatch:
     inputs:
       linux:
@@ -53,7 +48,6 @@ jobs:
     steps:
       - id: select
         env:
-          # empty on push/pull_request, which means "all platforms"
           WANT_LINUX: ${{ inputs.linux }}
           WANT_MACOS: ${{ inputs.macos }}
           WANT_WINDOWS: ${{ inputs.windows }}
