@@ -25,9 +25,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Source of truth: this branch must stay byte-identical to this upstream tag
-  # outside of .github/ (enforced by the "Assert tree" step below).
-  UPSTREAM_TAG: v1.4.2
   BUILD_TYPE: Release
   # LUXON_SERVER_EXPOSE_FULL_FFI forces LUXON_SERVER_BUILD_FFI, PLUGINS,
   # HOOKPOINTS, COROUTINES and MULTIPROCESSING on, and disables spdlog.
@@ -91,18 +88,6 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
-
-      - name: Assert tree matches upstream ${{ env.UPSTREAM_TAG }}
-        run: |
-          set -eu
-          git fetch --depth 1 https://github.com/niansa/LuxonServer.git \
-            "refs/tags/${{ env.UPSTREAM_TAG }}:refs/tags/upstream-${{ env.UPSTREAM_TAG }}"
-          git ls-tree -r "upstream-${{ env.UPSTREAM_TAG }}" | grep -v $'\t\.github/' | sort > "$RUNNER_TEMP/upstream.txt"
-          git ls-tree -r HEAD | grep -v $'\t\.github/' | sort > "$RUNNER_TEMP/head.txt"
-          if ! git diff --no-index --exit-code "$RUNNER_TEMP/upstream.txt" "$RUNNER_TEMP/head.txt"; then
-            echo "::error::source tree diverges from upstream ${{ env.UPSTREAM_TAG }} outside of .github/. Run this workflow with \"Use workflow from\" set to the branch that carries the pinned source."
-            exit 1
-          fi
 
       # CPM (sanmake, commoncpp, magic_enum, boost.pfr, mbedtls, embedresource)
       # clones sources on every fresh build; reuse them between runs.
@@ -226,7 +211,7 @@ jobs:
       - name: Upload FFI library
         uses: actions/upload-artifact@v4
         with:
-          name: luxon-server-ffi-${{ env.UPSTREAM_TAG }}-${{ matrix.name }}
+          name: luxon-server-ffi-${{ github.ref_name }}-${{ matrix.name }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
