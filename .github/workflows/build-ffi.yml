@@ -1,0 +1,198 @@
+name: Build FFI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ffi-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Source of truth: this branch must stay byte-identical to this upstream tag
+  # outside of .github/ (enforced by the "Assert tree" step below).
+  UPSTREAM_TAG: v1.4.2
+  BUILD_TYPE: Release
+  # LUXON_SERVER_EXPOSE_FULL_FFI forces LUXON_SERVER_BUILD_FFI, PLUGINS,
+  # HOOKPOINTS, COROUTINES and MULTIPROCESSING on, and disables spdlog.
+  # Sanitizers stay off: the FFI library is loaded by foreign runtimes, which
+  # must not inherit an ASan/UBSan runtime through it.
+  CMAKE_DEFINES: >-
+    -DLUXON_SERVER_EXPOSE_FULL_FFI=ON
+    -DLUXON_SERVER_USE_SANMAKE=OFF
+
+jobs:
+  build-ffi:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            generator: -G Ninja
+            build_flags: --parallel
+          - name: macos-arm64
+            os: macos-14
+            generator: -G Ninja
+            build_flags: --parallel
+          - name: windows-x86_64
+            os: windows-2022
+            generator: ""
+            build_flags: --config Release --parallel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Assert tree matches upstream ${{ env.UPSTREAM_TAG }}
+        run: |
+          set -eu
+          git fetch --depth 1 https://github.com/niansa/LuxonServer.git \
+            "refs/tags/${{ env.UPSTREAM_TAG }}:refs/tags/upstream-${{ env.UPSTREAM_TAG }}"
+          git ls-tree -r "upstream-${{ env.UPSTREAM_TAG }}" | grep -v $'\t\.github/' | sort > "$RUNNER_TEMP/upstream.txt"
+          git ls-tree -r HEAD | grep -v $'\t\.github/' | sort > "$RUNNER_TEMP/head.txt"
+          if ! git diff --no-index --exit-code "$RUNNER_TEMP/upstream.txt" "$RUNNER_TEMP/head.txt"; then
+            echo "::error::source tree diverges from upstream ${{ env.UPSTREAM_TAG }} outside of .github/"
+            exit 1
+          fi
+
+      # CPM (sanmake, commoncpp, magic_enum, boost.pfr, mbedtls, embedresource)
+      # clones sources on every fresh build; reuse them between runs.
+      - name: Cache CPM sources
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cpm-cache
+          key: cpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'Luxon/CMakeLists.txt') }}
+
+      - name: Toolchain prerequisites (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          if ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ninja-build
+          fi
+          # The server needs <print>/<format> (C++23), so GCC 13 is not enough.
+          found=""
+          for v in 14 15; do
+            if command -v "g++-$v" >/dev/null 2>&1 || sudo apt-get install -y "g++-$v"; then
+              found="$v"
+              break
+            fi
+          done
+          if [ -z "$found" ]; then
+            echo "::error::no GCC with C++23 <print> support available"
+            exit 1
+          fi
+          echo "CC=gcc-$found" >> "$GITHUB_ENV"
+          echo "CXX=g++-$found" >> "$GITHUB_ENV"
+          "g++-$found" --version
+
+      - name: Toolchain prerequisites (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+          # Apple Clang lacks a complete C++23 <print>/<format>; use LLVM instead.
+          brew install llvm
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
+          "$(brew --prefix llvm)/bin/clang++" --version
+
+      # The hosted images ship a vcpkg installation and a vcpkg.json manifest,
+      # which would silently pull dependencies in through vcpkg. Pin dependency
+      # resolution to CPM instead (same path upstream's own CI builds take).
+      - name: Pin dependency resolution to CPM
+        run: |
+          set -eu
+          mkdir -p build
+          printf '# no-op toolchain file: disables the image provided vcpkg toolchain\n' > build/no-vcpkg.cmake
+
+      - name: Configure
+        env:
+          CPM_SOURCE_CACHE: ${{ runner.temp }}/cpm-cache
+        run: |
+          set -eu
+          cmake -B build -S . ${{ matrix.generator }} \
+            "-DCMAKE_BUILD_TYPE=$BUILD_TYPE" \
+            "-DCMAKE_TOOLCHAIN_FILE=build/no-vcpkg.cmake" \
+            $CMAKE_DEFINES
+
+      - name: Build
+        run: |
+          set -eu
+          cmake --build build ${{ matrix.build_flags }}
+
+      - name: Collect artifacts
+        run: |
+          set -eu
+          mkdir -p dist
+          find build -maxdepth 2 -type f \
+            \( -name 'luxon_server_ffi.dll' -o -name 'luxon_server_ffi.lib' \
+               -o -name 'luxon_server_ffi.pdb' -o -name 'libluxon_server_ffi.so*' \
+               -o -name 'libluxon_server_ffi.dylib' \) \
+            -exec cp -v {} dist/ \;
+          cp -r ffi_include dist/ffi_include
+          cp config.example.yml dist/
+          if [ -z "$(find dist -type f -name '*luxon_server_ffi*' -print -quit)" ]; then
+            echo "::error::no FFI library was produced"
+            exit 1
+          fi
+          ls -l dist
+
+      # The header is the ABI contract: every function it declares has to be
+      # exported by the library, otherwise bindings would fail to load.
+      - name: Verify exported FFI surface
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          grep -oE '^FFI_FUNCTION\([^,]+, *[A-Za-z_][A-Za-z0-9_]*' ffi_include/luxon_server_ffi_exports.inc \
+            | sed -E 's/.*, *//' | sort > "$RUNNER_TEMP/expected.txt"
+          case "$RUNNER_OS" in
+            Windows)
+              # -nologo/-exports instead of /nologo//exports: MSYS rewrites
+              # arguments that look like absolute paths.
+              dumpbin=$(ls '/c/Program Files/Microsoft Visual Studio/2022'/*/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe | head -1)
+              "$dumpbin" -nologo -exports dist/luxon_server_ffi.dll \
+                | awk '{ if (NF >= 4 && $3 ~ /^[0-9A-Fa-f]{8}$/) print $4 }' | sort > "$RUNNER_TEMP/exported.txt"
+              ;;
+            Linux)
+              nm -D --defined-only dist/libluxon_server_ffi.so \
+                | awk '{ print $3 }' | sed 's/^_//' | sort -u > "$RUNNER_TEMP/exported.txt"
+              ;;
+            macOS)
+              nm -gU dist/libluxon_server_ffi.dylib \
+                | awk '{ print $3 }' | sed 's/^_//' | sort -u > "$RUNNER_TEMP/exported.txt"
+              ;;
+          esac
+          echo "declared: $(wc -l < "$RUNNER_TEMP/expected.txt")  exported: $(wc -l < "$RUNNER_TEMP/exported.txt")"
+          missing=$(comm -23 "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/exported.txt")
+          if [ -n "$missing" ]; then
+            echo "::error::FFI functions declared in the header but not exported:"
+            echo "$missing"
+            exit 1
+          fi
+
+      - name: Upload FFI library
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxon-server-ffi-${{ env.UPSTREAM_TAG }}-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
