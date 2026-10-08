@@ -5,7 +5,22 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  # Manual runs can pick the platforms; push/pull_request always build all of
+  # them because they carry no inputs.
   workflow_dispatch:
+    inputs:
+      linux:
+        description: Build the FFI library on Linux
+        type: boolean
+        default: true
+      macos:
+        description: Build the FFI library on macOS
+        type: boolean
+        default: true
+      windows:
+        description: Build the FFI library on Windows
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -28,28 +43,53 @@ env:
     -DLUXON_SERVER_USE_SANMAKE=OFF
 
 jobs:
+  # job level `if` cannot see `matrix`, so the enabled platforms are resolved
+  # here and handed to the build job as a generated matrix.
+  plan:
+    name: Select platforms
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - id: select
+        env:
+          # empty on push/pull_request, which means "all platforms"
+          WANT_LINUX: ${{ inputs.linux }}
+          WANT_MACOS: ${{ inputs.macos }}
+          WANT_WINDOWS: ${{ inputs.windows }}
+        run: |
+          set -eu
+          entries=""
+          add() {
+            if [ "$6" = "false" ]; then
+              return 0
+            fi
+            if [ -n "$entries" ]; then
+              entries="$entries,"
+            fi
+            entries="$entries{\"name\":\"$2\",\"os\":\"$3\",\"generator\":\"$4\",\"build_flags\":\"$5\"}"
+            return 0
+          }
+          add linux linux-x86_64 ubuntu-24.04 "-G Ninja" "--parallel" "${WANT_LINUX:-}"
+          add macos macos-arm64 macos-14 "-G Ninja" "--parallel" "${WANT_MACOS:-}"
+          add windows windows-x86_64 windows-2022 "" "--config Release --parallel" "${WANT_WINDOWS:-}"
+          if [ -z "$entries" ]; then
+            echo "::error::at least one platform must be enabled"
+            exit 1
+          fi
+          echo "platforms: $(echo "$entries" | grep -o '"os":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')"
+          echo "matrix={\"include\":[$entries]}" >> "$GITHUB_OUTPUT"
+
   build-ffi:
     name: ${{ matrix.name }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            os: ubuntu-24.04
-            generator: -G Ninja
-            build_flags: --parallel
-          - name: macos-arm64
-            os: macos-14
-            generator: -G Ninja
-            build_flags: --parallel
-          - name: windows-x86_64
-            os: windows-2022
-            generator: ""
-            build_flags: --config Release --parallel
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Checkout
