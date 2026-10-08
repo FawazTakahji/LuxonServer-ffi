@@ -100,7 +100,7 @@ jobs:
           git ls-tree -r "upstream-${{ env.UPSTREAM_TAG }}" | grep -v $'\t\.github/' | sort > "$RUNNER_TEMP/upstream.txt"
           git ls-tree -r HEAD | grep -v $'\t\.github/' | sort > "$RUNNER_TEMP/head.txt"
           if ! git diff --no-index --exit-code "$RUNNER_TEMP/upstream.txt" "$RUNNER_TEMP/head.txt"; then
-            echo "::error::source tree diverges from upstream ${{ env.UPSTREAM_TAG }} outside of .github/"
+            echo "::error::source tree diverges from upstream ${{ env.UPSTREAM_TAG }} outside of .github/. Run this workflow with \"Use workflow from\" set to the branch that carries the pinned source."
             exit 1
           fi
 
