@@ -83,7 +83,7 @@ Game::~Game() {
     server_manager.ipc_broadcast(ipc_event);
 #endif
 
-    server_manager.get_logger().info("Game '{}' in app '{}' is being deleted", lobby->app->id, id);
+    server_manager.get_logger().info("Game '{}' in app '{}' is being deleted", id, lobby->app->id);
 }
 
 Game::Game(std::shared_ptr<Lobby> lobby, std::string id, std::string_view server_address)
