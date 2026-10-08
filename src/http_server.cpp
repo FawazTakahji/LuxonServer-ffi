@@ -703,7 +703,7 @@ json HttpServer::route_request(std::string_view method, std::string path) {
         json res = json::array();
         for (const auto& conn : server_manager_.get_connections()) {
             const auto p = conn->get_peer();
-            json item = {{"address", p->enet_peer->remote_endpoint()->to_string()},
+            json item = {{"address", p->enet_peer->remote_endpoint().to_string()},
                          {"peer_id", p->enet_peer->peer_id()},
                          {"state", static_cast<int32_t>(p->enet_peer->state())},
                          {"stats",
@@ -746,7 +746,7 @@ json HttpServer::route_request(std::string_view method, std::string path) {
                 const auto p = conn->get_peer();
                 if (p->is_authenticated() && p->persistent->app->id == appId) {
                     res.push_back({{"peer_id", p->enet_peer->peer_id()},
-                                   {"address", p->enet_peer->remote_endpoint()->to_string()},
+                                   {"address", p->enet_peer->remote_endpoint().to_string()},
                                    {"user_id", p->persistent->user_id},
                                    {"token", p->persistent->token},
                                    {"stats",
